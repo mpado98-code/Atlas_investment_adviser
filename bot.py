@@ -177,13 +177,19 @@ def build_config() -> gtypes.GenerateContentConfig:
     return gtypes.GenerateContentConfig(
         system_instruction=SYSTEM_PROMPT,
         temperature=0.4,
-        max_output_tokens=2048,
+        # 8192 e' il massimo per Gemini 2.5 Flash/Pro. Configurabile via env
+        # nel caso si voglia ridurre per contenere i costi.
+        max_output_tokens=int(os.environ.get("MAX_OUTPUT_TOKENS", "8192")),
         tools=tools or None,
     )
 
 
 def call_gemini(conv: Conversation) -> str:
-    """Chiama Gemini con la storia conversazione e ritorna il testo finale."""
+    """Chiama Gemini con la storia conversazione e ritorna il testo finale.
+
+    Se la risposta viene troncata per limite di token (finish_reason
+    MAX_TOKENS), aggiunge un avviso visibile in fondo al testo.
+    """
     response = client.models.generate_content(
         model=MODEL,
         contents=conv.contents,
@@ -191,11 +197,29 @@ def call_gemini(conv: Conversation) -> str:
     )
 
     text = (response.text or "").strip()
+
+    # Estrai il finish_reason del primo candidato per capire se la risposta
+    # e' stata troncata.
+    finish_reason = None
+    try:
+        if response.candidates:
+            fr = response.candidates[0].finish_reason
+            finish_reason = getattr(fr, "name", str(fr)) if fr is not None else None
+    except Exception:
+        finish_reason = None
+
+    if finish_reason and finish_reason not in ("STOP", "FINISH_REASON_UNSPECIFIED"):
+        log.warning("Gemini finish_reason=%s (risposta possibilmente troncata)", finish_reason)
+        if finish_reason == "MAX_TOKENS":
+            text = (text or "[risposta troncata]") + (
+                "\n\n_[Risposta troncata: limite token raggiunto. "
+                "Scrivimi 'continua' per il resto, oppure riformula in modo piu' specifico.]_"
+            )
+
     if not text:
         text = "[risposta vuota dal modello]"
 
     # Salva la risposta come turno "model" con un singolo blocco testo.
-    # (I citation/grounding metadata non li persistiamo per restare snelli.)
     conv.add("model", [{"text": text}])
     return text
 
