@@ -5,6 +5,7 @@ Architettura:
 - Google Gemini 2.5 Pro come motore di ragionamento (vision + Google Search grounding)
 - Memoria conversazione in-memory per chat, persistita su file JSON
 - Whitelist utenti (TELEGRAM_ALLOWED_USER_IDS) per evitare accessi indesiderati
+- Modalita' polling (locale/VM) o webhook (Render/Fly/Vercel free tier)
 
 Tier gratuito Gemini API (https://aistudio.google.com):
   - Gemini 2.5 Pro: ~100 richieste/giorno, 5 al minuto
@@ -16,6 +17,18 @@ Variabili d'ambiente richieste:
   TELEGRAM_BOT_TOKEN          Token bot da @BotFather
   GOOGLE_API_KEY              API key da https://aistudio.google.com/apikey
   TELEGRAM_ALLOWED_USER_IDS   CSV di Telegram user id consentiti (es. "12345,67890")
+
+Modalita' di esecuzione:
+  MODE=polling   (default)  Adatto a esecuzione locale e VM sempre accese.
+  MODE=webhook              Espone un endpoint HTTP. Necessario per i piani
+                            Web Service gratuiti (Render, Fly, ecc.).
+                            Richiede inoltre:
+    WEBHOOK_URL             URL pubblico HTTPS del servizio (es.
+                            "https://atlas-bot.onrender.com")
+    WEBHOOK_SECRET_PATH     stringa random nel path URL per protezione
+                            (default: token del bot). Esempio: "tg-abc123".
+    PORT                    porta su cui ascoltare (Render la fornisce
+                            automaticamente come env var)
 
 Opzionali:
   GEMINI_MODEL                default: gemini-2.5-pro
@@ -382,8 +395,40 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.Document.IMAGE, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    log.info("Atlas avviato. Modello=%s, web_search=%s", MODEL, ENABLE_WEB_SEARCH)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    mode = os.environ.get("MODE", "polling").lower()
+    log.info(
+        "Atlas avviato. Modello=%s, web_search=%s, mode=%s",
+        MODEL, ENABLE_WEB_SEARCH, mode,
+    )
+
+    if mode == "webhook":
+        webhook_url = os.environ.get("WEBHOOK_URL", "").rstrip("/")
+        if not webhook_url:
+            raise RuntimeError(
+                "MODE=webhook ma WEBHOOK_URL non impostata. "
+                "Su Render imposta WEBHOOK_URL al tuo URL pubblico "
+                "(es. https://atlas-bot.onrender.com)."
+            )
+        # Path segreto nell'URL: chiunque conosca questo path puo' iniettare
+        # update fasulli. Default: usa una parte del token per renderlo non
+        # indovinabile, ma e' meglio impostarlo a mano.
+        secret_path = os.environ.get(
+            "WEBHOOK_SECRET_PATH",
+            TELEGRAM_TOKEN.split(":")[-1][:16],
+        )
+        port = int(os.environ.get("PORT", "10000"))
+        full_url = f"{webhook_url}/{secret_path}"
+        log.info("Webhook in ascolto su 0.0.0.0:%s, URL pubblico %s", port, full_url)
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=secret_path,
+            webhook_url=full_url,
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+        )
+    else:
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
